@@ -94,6 +94,22 @@ async function getCollections() {
   return { usingMongo: true, rooms: db.collection('rooms'), users: db.collection('users'), availability: db.collection('availability') };
 }
 
+function getMongoHostFromUri(uri) {
+  if (!uri || typeof uri !== 'string') return 'unknown';
+  try {
+    // strip protocol
+    const afterProtocol = uri.replace(/^mongodb(?:\+srv)?:\/\//i, '');
+    // take until first slash (remove db and params)
+    const beforeSlash = afterProtocol.split('/')[0];
+    // if credentials present, split at @ and keep the host part
+    const hostPart = beforeSlash.includes('@') ? beforeSlash.split('@')[1] : beforeSlash;
+    // mask possible ports/credentials left alone; return host list
+    return hostPart;
+  } catch (e) {
+    return 'unknown';
+  }
+}
+
 function slugify(value) {
   return value
     .toLowerCase()
@@ -384,10 +400,29 @@ app.get('/api/debug/db', async (_req, res) => {
   }
 });
 
+// Debug endpoint to return sample room documents (first 20)
+app.get('/api/debug/rooms', async (_req, res) => {
+  const { usingMongo, rooms } = await getCollections();
+  try {
+    if (usingMongo) {
+      const docs = await rooms.find({}).limit(20).toArray();
+      return res.json({ usingMongo: true, sample: docs.map(normalizeRoom) });
+    }
+    return res.json({ usingMongo: false, sample: memoryState.rooms.slice(0, 20) });
+  } catch (err) {
+    console.error('Error in /api/debug/rooms:', err && err.message ? err.message : String(err));
+    return res.status(500).json({ error: 'Error recuperando salas' });
+  }
+});
+
 // Try to establish DB connection at startup and log mode
 (async () => {
   const usingMongo = await connectMongo();
   console.log(`Database connection mode: ${usingMongo ? 'mongo' : 'memory'}`);
+  if (usingMongo && process.env.MONGODB_URI) {
+    const host = getMongoHostFromUri(process.env.MONGODB_URI);
+    console.log(`MongoDB host (from MONGODB_URI): ${host}`);
+  }
   app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
