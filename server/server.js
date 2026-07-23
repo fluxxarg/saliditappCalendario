@@ -73,13 +73,15 @@ async function connectMongo() {
   }
 
   try {
+    console.log('Attempting to connect to MongoDB Atlas...');
     mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     db = mongoClient.db(process.env.MONGODB_NAME || 'saliditapp-calendar');
-    console.log('Connected to MongoDB Atlas');
+    console.log(`Connected to MongoDB Atlas - database: ${process.env.MONGODB_NAME || 'saliditapp-calendar'}`);
     return true;
   } catch (error) {
-    console.warn('Falling back to in-memory store:', error.message);
+    console.error('MongoDB connection failed, falling back to in-memory store. Error:', error && error.message ? error.message : String(error));
+    if (error && error.stack) console.error(error.stack);
     return false;
   }
 }
@@ -165,18 +167,25 @@ app.post('/api/rooms', async (req, res) => {
   const { usingMongo, rooms } = await getCollections();
 
   if (usingMongo) {
-    const existing = await rooms.findOne({ slug });
-    if (existing) return res.status(409).json({ error: 'La sala ya existe' });
-    const roomDoc = {
-      slug,
-      name,
-      startDate,
-      endDate,
-      confirmedDate: null,
-      createdAt: new Date()
-    };
-    const result = await rooms.insertOne(roomDoc);
-    return res.status(201).json(normalizeRoom({ ...roomDoc, _id: result.insertedId }));
+    try {
+      const existing = await rooms.findOne({ slug });
+      if (existing) return res.status(409).json({ error: 'La sala ya existe' });
+      const roomDoc = {
+        slug,
+        name,
+        startDate,
+        endDate,
+        confirmedDate: null,
+        createdAt: new Date()
+      };
+      const result = await rooms.insertOne(roomDoc);
+      console.log('Inserted room into MongoDB:', { slug, insertedId: result.insertedId.toString() });
+      return res.status(201).json(normalizeRoom({ ...roomDoc, _id: result.insertedId }));
+    } catch (err) {
+      console.error('Error inserting room into MongoDB:', err && err.message ? err.message : String(err));
+      if (err && err.stack) console.error(err.stack);
+      return res.status(500).json({ error: 'Error interno al crear la sala' });
+    }
   }
 
   if (memoryState.rooms.some((room) => room.slug === slug)) {
@@ -356,6 +365,23 @@ app.patch('/api/rooms/:slug/availability/move', async (req, res) => {
 app.use(express.static(path.join(__dirname, '../client/dist')));
 app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, '../client/dist/index.html'));
+});
+
+// Debug endpoint to check DB status and counts
+app.get('/api/debug/db', async (_req, res) => {
+  const { usingMongo, rooms, users, availability } = await getCollections();
+  try {
+    if (usingMongo) {
+      const roomsCount = await rooms.countDocuments();
+      const usersCount = await users.countDocuments();
+      const availabilityCount = await availability.countDocuments();
+      return res.json({ usingMongo: true, roomsCount, usersCount, availabilityCount });
+    }
+    return res.json({ usingMongo: false, roomsCount: memoryState.rooms.length, usersCount: memoryState.users.length, availabilityCount: memoryState.availability.length });
+  } catch (err) {
+    console.error('Error in /api/debug/db:', err && err.message ? err.message : String(err));
+    return res.status(500).json({ error: 'Error comprobando la base de datos' });
+  }
 });
 
 // Try to establish DB connection at startup and log mode
