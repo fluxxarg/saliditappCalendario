@@ -94,6 +94,43 @@ async function getCollections() {
   return { usingMongo: true, rooms: db.collection('rooms'), users: db.collection('users'), availability: db.collection('availability') };
 }
 
+// Simple SSE (Server-Sent Events) support for real-time updates per room
+const sseClients = new Map(); // slug => Set<res>
+
+function sendSSE(slug, event, data) {
+  try {
+    const clients = sseClients.get(slug);
+    if (!clients) return;
+    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const res of clients) {
+      try {
+        res.write(payload);
+      } catch (e) {
+        // ignore per-client errors; they'll be cleaned up on close
+      }
+    }
+  } catch (e) {
+    console.error('Error broadcasting SSE:', e && e.message ? e.message : String(e));
+  }
+}
+
+app.get('/api/rooms/:slug/stream', async (req, res) => {
+  const { slug } = req.params;
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders && res.flushHeaders();
+
+  if (!sseClients.has(slug)) sseClients.set(slug, new Set());
+  const clients = sseClients.get(slug);
+  clients.add(res);
+
+  req.on('close', () => {
+    clients.delete(res);
+    if (clients.size === 0) sseClients.delete(slug);
+  });
+});
+
 function getMongoHostFromUri(uri) {
   if (!uri || typeof uri !== 'string') return 'unknown';
   try {
@@ -196,6 +233,8 @@ app.post('/api/rooms', async (req, res) => {
       };
       const result = await rooms.insertOne(roomDoc);
       console.log('Inserted room into MongoDB:', { slug, insertedId: result.insertedId.toString() });
+      // broadcast room creation
+      try { sendSSE(slug, 'room-created', normalizeRoom({ ...roomDoc, _id: result.insertedId })); } catch (e) {}
       return res.status(201).json(normalizeRoom({ ...roomDoc, _id: result.insertedId }));
     } catch (err) {
       console.error('Error inserting room into MongoDB:', err && err.message ? err.message : String(err));
@@ -210,6 +249,7 @@ app.post('/api/rooms', async (req, res) => {
 
   const room = { id: randomUUID(), slug, name, startDate, endDate, confirmedDate: null, createdAt: new Date().toISOString() };
   memoryState.rooms.push(room);
+  try { sendSSE(slug, 'room-created', room); } catch (e) {}
   res.status(201).json(room);
 });
 
@@ -229,11 +269,13 @@ app.patch('/api/rooms/:slug/confirm', async (req, res) => {
   if (usingMongo) {
     await rooms.updateOne({ slug: req.params.slug }, { $set: { confirmedDate: nextValue } });
     const updated = await rooms.findOne({ slug: req.params.slug });
+    try { sendSSE(req.params.slug, 'room-confirmed', normalizeRoom(updated)); } catch (e) {}
     return res.json(normalizeRoom(updated));
   }
 
   const index = memoryState.rooms.findIndex((entry) => entry.slug === req.params.slug);
   memoryState.rooms[index].confirmedDate = nextValue;
+  try { sendSSE(req.params.slug, 'room-confirmed', memoryState.rooms[index]); } catch (e) {}
   res.json(memoryState.rooms[index]);
 });
 
@@ -268,10 +310,12 @@ app.post('/api/rooms/:slug/users', async (req, res) => {
   if (usingMongo) {
     const result = await users.insertOne({ _id: new ObjectId(), ...userDoc, createdAt: new Date() });
     const created = await users.findOne({ _id: result.insertedId });
+    try { sendSSE(room.slug, 'user-created', normalizeUser(created)); } catch (e) {}
     return res.status(201).json(normalizeUser(created));
   }
 
   memoryState.users.push(userDoc);
+  try { sendSSE(room.slug, 'user-created', userDoc); } catch (e) {}
   res.status(201).json(userDoc);
 });
 
@@ -282,11 +326,13 @@ app.delete('/api/rooms/:slug/users/:id', async (req, res) => {
   if (usingMongo) {
     await users.deleteMany({ roomId: room.id, _id: new ObjectId(req.params.id) });
     await availability.deleteMany({ roomId: room.id, userId: req.params.id });
+    try { sendSSE(req.params.slug, 'user-deleted', { id: req.params.id }); } catch (e) {}
     return res.json({ success: true });
   }
 
   memoryState.users = memoryState.users.filter((user) => !(user.roomId === room.id && user.id === req.params.id));
   memoryState.availability = memoryState.availability.filter((entry) => !(entry.roomId === room.id && entry.userId === req.params.id));
+  try { sendSSE(req.params.slug, 'user-deleted', { id: req.params.id }); } catch (e) {}
   res.json({ success: true });
 });
 
@@ -319,20 +365,24 @@ app.post('/api/rooms/:slug/availability', async (req, res) => {
     if (existing) {
       await availability.updateOne({ _id: existing._id }, { $set: { note: note || '' } });
       const updated = await availability.findOne({ _id: existing._id });
+        try { sendSSE(req.params.slug, 'availability-updated', normalizeAvailability(updated)); } catch (e) {}
       return res.json(normalizeAvailability(updated));
     }
     const result = await availability.insertOne({ _id: new ObjectId(), ...payload });
     const created = await availability.findOne({ _id: result.insertedId });
+      try { sendSSE(req.params.slug, 'availability-created', normalizeAvailability(created)); } catch (e) {}
     return res.status(201).json(normalizeAvailability(created));
   }
 
   const existing = memoryState.availability.find((item) => item.roomId === room.id && item.userId === userId && item.date === date);
   if (existing) {
     existing.note = note || '';
+    try { sendSSE(req.params.slug, 'availability-updated', existing); } catch (e) {}
     return res.json(existing);
   }
   const item = { id: randomUUID(), ...payload };
   memoryState.availability.push(item);
+  try { sendSSE(req.params.slug, 'availability-created', item); } catch (e) {}
   res.status(201).json(item);
 });
 
@@ -344,9 +394,11 @@ app.delete('/api/rooms/:slug/availability', async (req, res) => {
   const { usingMongo, availability } = await getCollections();
   if (usingMongo) {
     await availability.deleteMany({ roomId: room.id, userId, date });
+    try { sendSSE(req.params.slug, 'availability-deleted', { userId, date }); } catch (e) {}
     return res.json({ success: true });
   }
   memoryState.availability = memoryState.availability.filter((item) => !(item.roomId === room.id && item.userId === userId && item.date === date));
+  try { sendSSE(req.params.slug, 'availability-deleted', { userId, date }); } catch (e) {}
   res.json({ success: true });
 });
 
@@ -365,6 +417,7 @@ app.patch('/api/rooms/:slug/availability/move', async (req, res) => {
     await availability.deleteMany({ roomId: room.id, userId, date: fromDate });
     const created = await availability.insertOne({ _id: new ObjectId(), roomId: room.id, userId, date: toDate, note: '' });
     const item = await availability.findOne({ _id: created.insertedId });
+    try { sendSSE(req.params.slug, 'availability-moved', normalizeAvailability(item)); } catch (e) {}
     return res.json(normalizeAvailability(item));
   }
 
@@ -375,6 +428,7 @@ app.patch('/api/rooms/:slug/availability/move', async (req, res) => {
   memoryState.availability = memoryState.availability.filter((item) => !(item.roomId === room.id && item.userId === userId && item.date === fromDate));
   const item = { id: randomUUID(), roomId: room.id, userId, date: toDate, note: '' };
   memoryState.availability.push(item);
+  try { sendSSE(req.params.slug, 'availability-moved', item); } catch (e) {}
   res.json(item);
 });
 

@@ -122,6 +122,7 @@ function App() {
   const [pendingDates, setPendingDates] = useState(new Set());
   const [expandedBestDay, setExpandedBestDay] = useState(null);
   const availabilityRef = useRef([]);
+  const sseRef = useRef(null);
 
   useEffect(() => {
     const path = window.location.pathname.replace(/^\//, '') || '';
@@ -137,6 +138,87 @@ function App() {
   useEffect(() => {
     availabilityRef.current = availability;
   }, [availability]);
+
+  // Subscribe to server-sent events for real-time updates when viewing a room
+  useEffect(() => {
+    if (!slug) return undefined;
+    try {
+      const es = new EventSource(`${API_BASE}/rooms/${slug}/stream`);
+      sseRef.current = es;
+
+      const safeParse = (s) => {
+        try { return JSON.parse(s); } catch (e) { return null; }
+      };
+
+      es.addEventListener('availability-created', (e) => {
+        const data = safeParse(e.data);
+        if (!data) return;
+        setAvailability((prev) => {
+          const exists = prev.some((it) => it.id === data.id);
+          if (exists) return prev.map((it) => (it.id === data.id ? data : it));
+          return [...prev, data];
+        });
+      });
+
+      es.addEventListener('availability-updated', (e) => {
+        const data = safeParse(e.data);
+        if (!data) return;
+        setAvailability((prev) => prev.map((it) => (it.id === data.id ? data : it)));
+      });
+
+      es.addEventListener('availability-deleted', (e) => {
+        const data = safeParse(e.data);
+        if (!data) return;
+        setAvailability((prev) => prev.filter((it) => !(it.userId === data.userId && it.date === data.date)));
+      });
+
+      es.addEventListener('availability-moved', (e) => {
+        const data = safeParse(e.data);
+        if (!data) return;
+        setAvailability((prev) => {
+          const without = prev.filter((it) => !(it.userId === data.userId && it.date === data.date));
+          return [...without, data];
+        });
+      });
+
+      es.addEventListener('room-confirmed', (e) => {
+        const data = safeParse(e.data);
+        if (!data) return;
+        setRoom(data);
+      });
+
+      es.addEventListener('user-created', (e) => {
+        const data = safeParse(e.data);
+        if (!data) return;
+        setUsers((prev) => {
+          if (prev.some((u) => u.id === data.id)) return prev;
+          return [...prev, data];
+        });
+      });
+
+      es.addEventListener('user-deleted', (e) => {
+        const data = safeParse(e.data);
+        if (!data) return;
+        setUsers((prev) => prev.filter((u) => u.id !== data.id));
+      });
+
+      es.addEventListener('room-created', () => {
+        // rooms list changed, refresh when returning to index
+        loadRooms();
+      });
+
+      es.onerror = () => {
+        try { es.close(); } catch (e) {}
+      };
+
+      return () => {
+        try { es.close(); } catch (e) {}
+        if (sseRef.current === es) sseRef.current = null;
+      };
+    } catch (err) {
+      return undefined;
+    }
+  }, [slug]);
 
   useEffect(() => {
     if (!dragging) return;
@@ -395,9 +477,9 @@ function App() {
           <div className="disclaimer-overlay" onClick={() => setShowDisclaimer(false)}>
             <div className="disclaimer-modal" onClick={(e) => e.stopPropagation()}>
               <button className="close-button" type="button" onClick={() => setShowDisclaimer(false)} aria-label="Cerrar">×</button>
-              <h3>Uso gratuito</h3>
-              <p>Esta app es de uso gratuito con todos los logos de uso libre.</p>
-              <p>Reconocimiento especial al autor: Emiliano Luna.</p>
+              <h3>Disclaimer</h3>
+              <p>App de uso para actividades recreativas, gratuita y pública.</p>
+              <p>Queda prohibido el uso malicioso y mal intencionado.</p>
             </div>
           </div>
         )}
@@ -460,9 +542,9 @@ function App() {
           <div className="disclaimer-overlay" onClick={() => setShowDisclaimer(false)}>
             <div className="disclaimer-modal" onClick={(e) => e.stopPropagation()}>
               <button className="close-button" type="button" onClick={() => setShowDisclaimer(false)} aria-label="Cerrar">×</button>
-              <h3>Uso gratuito</h3>
-              <p>Esta app es de uso gratuito con todos los logos de uso libre.</p>
-              <p>Reconocimiento especial al autor: Emiliano Luna.</p>
+              <h3>Disclaimer</h3>
+              <p>App de uso para actividades recreativas, gratuita y pública.</p>
+              <p>Queda prohibido el uso malicioso y mal intencionado.</p>
             </div>
           </div>
         )}
