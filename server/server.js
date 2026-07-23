@@ -358,6 +358,11 @@ app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, '../client/dist/index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+// Try to establish DB connection at startup and log mode
+(async () => {
+  const usingMongo = await connectMongo();
+  console.log(`Database connection mode: ${usingMongo ? 'mongo' : 'memory'}`);
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+})();
