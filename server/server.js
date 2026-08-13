@@ -78,6 +78,17 @@ async function connectMongo() {
     await mongoClient.connect();
     db = mongoClient.db(process.env.MONGODB_NAME || 'saliditapp-calendar');
     console.log(`Connected to MongoDB Atlas - database: ${process.env.MONGODB_NAME || 'saliditapp-calendar'}`);
+    
+    // Create unique index on availability collection to prevent duplicates
+    const availabilityCollection = db.collection('availability');
+    await availabilityCollection.createIndex(
+      { roomId: 1, userId: 1, date: 1 },
+      { unique: true, name: 'unique_user_date_per_room' }
+    ).catch(err => {
+      // Index might already exist, that's ok
+      if (!err.message.includes('already exists')) console.error('Index creation warning:', err.message);
+    });
+    
     return true;
   } catch (error) {
     console.error('MongoDB connection failed, falling back to in-memory store. Error:', error && error.message ? error.message : String(error));
@@ -361,17 +372,31 @@ app.post('/api/rooms/:slug/availability', async (req, res) => {
   const { usingMongo, availability } = await getCollections();
   const payload = { roomId: room.id, userId, date, note: note || '' };
   if (usingMongo) {
-    const existing = await availability.findOne({ roomId: room.id, userId, date });
-    if (existing) {
-      await availability.updateOne({ _id: existing._id }, { $set: { note: note || '' } });
-      const updated = await availability.findOne({ _id: existing._id });
+    try {
+      const existing = await availability.findOne({ roomId: room.id, userId, date });
+      if (existing) {
+        await availability.updateOne({ _id: existing._id }, { $set: { note: note || '' } });
+        const updated = await availability.findOne({ _id: existing._id });
         try { sendSSE(req.params.slug, 'availability-updated', normalizeAvailability(updated)); } catch (e) {}
-      return res.json(normalizeAvailability(updated));
-    }
-    const result = await availability.insertOne({ _id: new ObjectId(), ...payload });
-    const created = await availability.findOne({ _id: result.insertedId });
+        return res.json(normalizeAvailability(updated));
+      }
+      const result = await availability.insertOne({ _id: new ObjectId(), ...payload });
+      const created = await availability.findOne({ _id: result.insertedId });
       try { sendSSE(req.params.slug, 'availability-created', normalizeAvailability(created)); } catch (e) {}
-    return res.status(201).json(normalizeAvailability(created));
+      return res.status(201).json(normalizeAvailability(created));
+    } catch (insertError) {
+      // Handle duplicate key error (race condition) by treating it as an update
+      if (insertError.code === 11000) {
+        const existing = await availability.findOne({ roomId: room.id, userId, date });
+        if (existing) {
+          await availability.updateOne({ _id: existing._id }, { $set: { note: note || '' } });
+          const updated = await availability.findOne({ _id: existing._id });
+          try { sendSSE(req.params.slug, 'availability-updated', normalizeAvailability(updated)); } catch (e) {}
+          return res.json(normalizeAvailability(updated));
+        }
+      }
+      throw insertError;
+    }
   }
 
   const existing = memoryState.availability.find((item) => item.roomId === room.id && item.userId === userId && item.date === date);

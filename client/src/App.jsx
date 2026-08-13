@@ -52,6 +52,17 @@ function getRoomDateRange(selection) {
   };
 }
 
+function isPastDate(dateString, createdAtISO) {
+  if (!dateString || !createdAtISO) return false;
+  const cellDate = new Date(`${dateString}T00:00:00`);
+  const createdDate = new Date(createdAtISO);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  
+  // A day is past if it's before today
+  return cellDate < today;
+}
+
 function getCalendarMonths(startDate, endDate) {
   const start = new Date(`${startDate}T00:00:00`);
   const end = new Date(`${endDate}T23:59:59`);
@@ -154,16 +165,20 @@ function App() {
         const data = safeParse(e.data);
         if (!data) return;
         setAvailability((prev) => {
-          const exists = prev.some((it) => it.id === data.id);
-          if (exists) return prev.map((it) => (it.id === data.id ? data : it));
-          return [...prev, data];
+          // Remove any existing entry for this user-date combo to prevent duplicates
+          const filtered = prev.filter((it) => !(it.userId === data.userId && it.date === data.date));
+          return [...filtered, data];
         });
       });
 
       es.addEventListener('availability-updated', (e) => {
         const data = safeParse(e.data);
         if (!data) return;
-        setAvailability((prev) => prev.map((it) => (it.id === data.id ? data : it)));
+        setAvailability((prev) => {
+          // Remove any existing entry for this user-date combo and add the updated one
+          const filtered = prev.filter((it) => !(it.userId === data.userId && it.date === data.date));
+          return [...filtered, data];
+        });
       });
 
       es.addEventListener('availability-deleted', (e) => {
@@ -360,8 +375,14 @@ function App() {
 
     addPendingDate(dateString);
     if (shouldAdd) {
-      setAvailability((prev) => [...prev, { userId, date: dateString, note: notes[userId] || '', id: placeholderId }]);
+      // Add placeholder while waiting for server response
+      setAvailability((prev) => {
+        // Remove any existing entry for this user-date to avoid duplicates
+        const filtered = prev.filter((it) => !(it.userId === userId && it.date === dateString));
+        return [...filtered, { userId, date: dateString, note: notes[userId] || '', id: placeholderId }];
+      });
     } else {
+      // Remove the entry for this user-date
       setAvailability((prev) => prev.filter((item) => !(item.date === dateString && item.userId === userId)));
     }
 
@@ -374,7 +395,11 @@ function App() {
         });
         const created = await res.json();
         if (!res.ok) throw new Error(created.error || 'No se pudo guardar la disponibilidad');
-        setAvailability((prev) => prev.map((item) => (item.id === placeholderId ? created : item)));
+        // Replace placeholder with actual server response, removing any duplicates
+        setAvailability((prev) => {
+          const filtered = prev.filter((item) => !(item.userId === userId && item.date === dateString));
+          return [...filtered, created];
+        });
       } else {
         const res = await fetch(`${API_BASE}/rooms/${slug}/availability?userId=${userId}&date=${dateString}`, { method: 'DELETE' });
         const data = await res.json().catch(() => ({}));
@@ -706,20 +731,22 @@ function App() {
                     const isConfirmed = room?.confirmedDate === cell.dateKey;
                     const selected = usersForDay.some((user) => user?.id === currentUserId);
                     const isPending = pendingDates.has(cell.dateKey);
+                    const isPast = isPastDate(cell.dateKey, room?.createdAt);
                     return (
                       <button
                         key={cellIndex}
-                        disabled={!cell.inRange || !currentUserId}
-                        className={`day-cell ${selected ? 'selected' : ''} ${isConfirmed ? 'confirmed' : ''} ${!cell.inRange ? 'disabled' : ''} ${cell.currentMonth === false ? 'other-month' : ''} ${isPending ? 'pending' : ''}`}
-                        onPointerDown={() => cell.inRange && handleDayPointerDown(cell.dateKey, currentUserId)}
-                        onPointerEnter={() => cell.inRange && handleDayPointerEnter(cell.dateKey, currentUserId)}
+                        disabled={!cell.inRange || !currentUserId || isPast}
+                        className={`day-cell ${selected ? 'selected' : ''} ${isConfirmed ? 'confirmed' : ''} ${!cell.inRange ? 'disabled' : ''} ${cell.currentMonth === false ? 'other-month' : ''} ${isPending ? 'pending' : ''} ${isPast ? 'past' : ''}`}
+                        onPointerDown={() => cell.inRange && !isPast && handleDayPointerDown(cell.dateKey, currentUserId)}
+                        onPointerEnter={() => cell.inRange && !isPast && handleDayPointerEnter(cell.dateKey, currentUserId)}
                         onPointerUp={() => setDragging(false)}
                       >
                         <span className="day-number">{cell.date.getDate()}</span>
                         <div className="day-meta">
-                          {usersForDay.length > 0 ? `${usersForDay.length}/${users.length}` : cell.inRange ? '—' : ''}
+                          {usersForDay.length > 0 ? `${usersForDay.length}/${users.length}` : cell.inRange && !isPast ? '—' : ''}
                         </div>
                         {!cell.inRange && <span className="day-x">×</span>}
+                        {isPast && <span className="day-x past-x">×</span>}
                         {usersForDay.length > 0 && usersForDay.length === 1 && (
                           <div className="single-color" style={{ backgroundColor: usersForDay[0].color }} />
                         )}
@@ -744,10 +771,10 @@ function App() {
             <div className="footer-icon-circle">
               <img src="/assets/logocircle-CxSLZn0d.png" alt="Fluxxar Software Studio" className="footer-logo" />
             </div>
-            <p className="footer-brand-text">© 2026 Fluxxar Software Studio™</p>
+            <p className="footer-brand-text">© 2026 Desarrollado por Emiliano Luna™</p>
           </div>
           <p className="footer-note">Todos los derechos reservados.</p>
-          <p className="footer-note">Desarrollado por Emiliano Luna.</p>
+          <p className="footer-note"></p>
         </div>
       </footer>
     </div>

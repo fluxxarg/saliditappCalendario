@@ -7,6 +7,6 @@
     "dev:client": "npm run dev --prefix client"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^10.0.4"
   }
 }
